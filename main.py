@@ -1,6 +1,8 @@
 import re
 import sys
 import os
+import ast
+import typing
 
 
 class Utils:
@@ -20,7 +22,7 @@ class Utils:
         return msg if cond else None
 
 
-class Checkers:
+class StaticCheckers:
     def __init__(self):
         self.preceding_empty_lines = 0
 
@@ -112,25 +114,70 @@ class Checkers:
             return Utils.form_msg(is_issue, f"Function name {fn_name} should use snake_case")
 
 
+class CheckAst:
+    def __init__(self, code):
+        self.issues = {}
+        self.tree = ast.parse(code)
+
+    def append_issue(self, lineno: int, err: (str, str)):
+        if lineno not in self.issues:
+            self.issues[lineno] = []
+        self.issues[lineno].append(err)
+
+    def check(self):
+        name_pattern = r"[_a-z]+[_a-z\d]*$"
+
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef):
+                fn_node = typing.cast(ast.FunctionDef, node)
+
+                for arg in fn_node.args.args:
+                    if re.match(name_pattern, arg.arg) is None:
+                        issue = 's010', f"Argument name '{arg.arg}' should be snake_case"
+                        self.append_issue(fn_node.lineno, issue)
+                        break
+
+                for arg_default in fn_node.args.defaults:
+                    if isinstance(arg_default, (ast.List, ast.Dict)):
+                        issue = 's012', 'Default argument value is mutable'
+                        self.append_issue(fn_node.lineno, issue)
+                        break
+
+                for local_node in ast.walk(fn_node):
+                    if isinstance(local_node, ast.Name) and isinstance(local_node.ctx, ast.Store):
+                        if re.match(name_pattern, local_node.id) is None:
+                            issue = 's011', f"Variable '{local_node.id}' in function should be snake_case"
+                            self.append_issue(local_node.lineno, issue)
+
+
 def lint_file(file_path):
     with open(file_path) as f:
-        checkers = Checkers()
-        for num, line in enumerate(f.readlines(), start=1):
-            for instance_attr in dir(checkers):
+        code = f.read()
+
+        static_checkers = StaticCheckers()
+        check_ast = CheckAst(code)
+        check_ast.check()
+
+        for num, line in enumerate(code.splitlines(), start=1):
+            for instance_attr in dir(static_checkers):
                 pattern = r"check_issue_(s\d{3})$"
                 match = re.match(pattern, instance_attr)
                 if match:
-                    check_issue_fn = getattr(checkers, match.group())
+                    check_issue_fn = getattr(static_checkers, match.group())
                     code = match.group(1)
                     issue_msg = check_issue_fn(line)
                     if issue_msg:
                         print(f'{file_path}: Line {num}: {code} {issue_msg}')
 
+            line_ast_issues = check_ast.issues.get(num, [])
+            for ast_issue_code, ast_issue_msg in line_ast_issues:
+                print(f'{file_path}: Line {num}: {ast_issue_code} {ast_issue_msg}')
+
 
 def lint_directory(directory_path):
     for root_path, dirs, files in os.walk(directory_path):
         for file_path in files:
-            if re.search(r"\d+\.py$", file_path):
+            if re.search(r"\.py$", file_path):
                 file_full_path = os.path.join(root_path, file_path)
                 lint_file(file_full_path)
 
